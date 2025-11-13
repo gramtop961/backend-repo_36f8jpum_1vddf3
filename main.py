@@ -1,71 +1,75 @@
-import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import os
+from typing import Optional
+from schemas import LoginRequest, LoginResponse, KYCRequest, KYCStatus, Card, Transaction, DemoEvent
+from database import db, create_document, get_documents
 
-app = FastAPI()
+app = FastAPI(title="KardX Demo Backend", version="0.1.0")
 
+# CORS for frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello from FastAPI Backend!"}
+KARDX_API_BASE = os.getenv("KARDX_API_BASE", "https://api.kardx.example.com")
 
-@app.get("/api/hello")
-def hello():
-    return {"message": "Hello from the backend API!"}
+# Health and test endpoints
+@app.get("/")
+async def root():
+    return {"status": "ok", "service": "kardx-demo-backend"}
 
 @app.get("/test")
-def test_database():
-    """Test endpoint to check if database is available and accessible"""
-    response = {
-        "backend": "✅ Running",
-        "database": "❌ Not Available",
-        "database_url": None,
-        "database_name": None,
-        "connection_status": "Not Connected",
-        "collections": []
-    }
-    
+async def test_db():
     try:
-        # Try to import database module
-        from database import db
-        
-        if db is not None:
-            response["database"] = "✅ Available"
-            response["database_url"] = "✅ Configured"
-            response["database_name"] = db.name if hasattr(db, 'name') else "✅ Connected"
-            response["connection_status"] = "Connected"
-            
-            # Try to list collections to verify connectivity
-            try:
-                collections = db.list_collection_names()
-                response["collections"] = collections[:10]  # Show first 10 collections
-                response["database"] = "✅ Connected & Working"
-            except Exception as e:
-                response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
-        else:
-            response["database"] = "⚠️  Available but not initialized"
-            
-    except ImportError:
-        response["database"] = "❌ Database module not found (run enable-database first)"
+        # Attempt a simple list on a temporary collection
+        _ = get_documents("test", {}, limit=1)
+        return {"database": "connected"}
     except Exception as e:
-        response["database"] = f"❌ Error: {str(e)[:50]}"
-    
-    # Check environment variables
-    import os
-    response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
-    response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
-    
-    return response
+        return {"database": "error", "detail": str(e)}
 
+# Auth proxy (demo)
+@app.post("/login", response_model=LoginResponse)
+async def login(payload: LoginRequest):
+    # In a real integration, proxy to KardX auth. For demo, generate token
+    if not payload.username or not payload.password:
+        raise HTTPException(status_code=400, detail="Missing credentials")
+    token = f"demo_{payload.username}_token"
+    _ = create_document("auth", {"username": payload.username, "token": token})
+    return LoginResponse(token=token, expires_in=3600)
 
-if __name__ == "__main__":
-    import uvicorn
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+@app.post("/kyc", response_model=KYCStatus)
+async def kyc_status(req: KYCRequest):
+    # Simulate KYC verification lookup
+    status = "verified" if req.token.startswith("demo_") else "pending"
+    verified = status == "verified"
+    _ = create_document("kyc", {"token": req.token, "status": status, "verified": verified})
+    return KYCStatus(status=status, verified=verified)
+
+@app.get("/cards", response_model=list[Card])
+async def list_cards(token: Optional[str] = None):
+    # Demo cards
+    data = [
+        {"id": "card_1", "last4": "4242", "brand": "Visa", "holder": "KardX User", "exp_month": 12, "exp_year": 2027},
+        {"id": "card_2", "last4": "1111", "brand": "Mastercard", "holder": "KardX User", "exp_month": 6, "exp_year": 2026},
+    ]
+    return [Card(**c) for c in data]
+
+@app.get("/transactions", response_model=list[Transaction])
+async def list_transactions(token: Optional[str] = None):
+    import datetime
+    tx = [
+        {"id": "tx_1", "amount": 1299.0, "currency": "INR", "description": "Bill Pay", "status": "success", "created_at": datetime.datetime.utcnow()},
+        {"id": "tx_2", "amount": 499.0, "currency": "INR", "description": "Card to Bank Payout", "status": "pending", "created_at": datetime.datetime.utcnow()},
+    ]
+    return [Transaction(**t) for t in tx]
+
+@app.post("/demo-event")
+async def demo_event(event: DemoEvent):
+    _ = create_document("demo_events", event)
+    return {"ok": True}
